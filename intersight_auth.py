@@ -12,7 +12,7 @@ from six.moves.urllib.parse import urlparse
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
-
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from requests.auth import AuthBase
 
 def _get_sha256_digest(data):
@@ -32,7 +32,7 @@ def _prepare_string_to_sign(req_tgt, hdrs):
     :return: instance of digest object
     """
 
-    signature_string = '(request-target): ' + req_tgt.lower() + '\n'
+    signature_string = '(request-target): ' + req_tgt + '\n'
 
     for i, (key, value) in enumerate(hdrs.items()):
         signature_string += key.lower() + ': ' + value
@@ -42,22 +42,29 @@ def _prepare_string_to_sign(req_tgt, hdrs):
     return signature_string
 
 
-def _get_rsasig_b64(key, string_to_sign):
+def _get_sig_base64(key, string_to_sign):
+    if isinstance(key, rsa.RSAPrivateKey):
+        return b64encode(key.sign(string_to_sign, padding.PKCS1v15(), hashes.SHA256()))
+    elif isinstance(key, ec.EllipticCurvePrivateKey):
+        return b64encode(key.sign(string_to_sign, ec.ECDSA(hashes.SHA256())))
+    else:
+        raise ValueError(f"unsupported key type: '{type(key).__name__}'")
 
-    return b64encode(key.sign(
-        string_to_sign,
-        padding.PKCS1v15(),
-        hashes.SHA256()))
-
+def _get_signing_scheme(key):
+    if isinstance(key, rsa.RSAPrivateKey):
+        return 'rsa-sha256'
+    elif isinstance(key, ec.EllipticCurvePrivateKey):
+        return 'hs2019'
+    else:
+        raise ValueError(f"unsupported key type: '{type(key).__name__}'")
 
 def _get_auth_header(signing_headers, method, path, api_key_id, secret_key):
 
-    string_to_sign = _prepare_string_to_sign(method + " " + path, signing_headers)
-    b64_signed_auth_digest = _get_rsasig_b64(secret_key, string_to_sign.encode())
+    string_to_sign = _prepare_string_to_sign(method.lower() + " " + path, signing_headers)
+    b64_signed_auth_digest = _get_sig_base64(secret_key, string_to_sign.encode())
 
     auth_str = (
-        'Signature keyId="' + api_key_id + '",' +
-        'algorithm="rsa-sha256",headers="(request-target)'
+        f'Signature keyId="{api_key_id}",algorithm="{_get_signing_scheme(secret_key)}",headers="(request-target)'
         )
 
     for key in signing_headers:
@@ -77,7 +84,6 @@ class IntersightAuth(AuthBase):
         self.secret_key_filename = secret_key_filename
         self.api_key_id = api_key_id
         self.secret_key_file_password = secret_key_file_password
-
         with open(secret_key_filename, "rb") as secret_key_file:
             self.secret_key = serialization.load_pem_private_key(
                 secret_key_file.read(),
